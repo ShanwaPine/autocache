@@ -638,6 +638,47 @@ func TestResponseWrapper(t *testing.T) {
 	}
 }
 
+func TestResponseWrapperFlush(t *testing.T) {
+	// Test that responseWrapper implements http.Flusher interface
+	// This test validates that the Flush method is properly implemented for streaming (PR #8)
+	rr := httptest.NewRecorder()
+	wrapper := &responseWrapper{ResponseWriter: rr, statusCode: http.StatusOK}
+
+	// Verify that wrapper implements http.Flusher
+	flusher, ok := interface{}(wrapper).(http.Flusher)
+	if !ok {
+		t.Fatal("responseWrapper does not implement http.Flusher interface")
+	}
+
+	// Test that Flush can be called without panic
+	// httptest.ResponseRecorder implements Flusher, so this should work
+	flusher.Flush()
+
+	// Verify Flush was called on the underlying ResponseWriter
+	if !rr.Flushed {
+		t.Error("Expected Flush to be called on underlying ResponseWriter")
+	}
+}
+
+func TestResponseWrapperFlushWithNonFlusher(t *testing.T) {
+	// Test that responseWrapper handles underlying ResponseWriter that doesn't implement Flusher
+	// Create a minimal ResponseWriter that doesn't implement Flusher
+	type minimalWriter struct {
+		http.ResponseWriter
+		headers http.Header
+	}
+	mw := &minimalWriter{headers: make(http.Header)}
+
+	wrapper := &responseWrapper{ResponseWriter: mw, statusCode: http.StatusOK}
+
+	// If wrapper implements Flusher, calling it should not panic even if underlying doesn't
+	flusher, ok := interface{}(wrapper).(http.Flusher)
+	if ok {
+		// Should not panic
+		flusher.Flush()
+	}
+}
+
 func TestWriteError(t *testing.T) {
 	cfg := &config.Config{CacheStrategy: "moderate"}
 	logger := logrus.New()
