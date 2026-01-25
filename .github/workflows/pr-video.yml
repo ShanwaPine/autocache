@@ -8,6 +8,9 @@ jobs:
   generate-video:
     runs-on: ubuntu-latest
     if: github.event.label.name == 'generate-video'
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - name: Generate PR Video
         uses: jmrobles/prvideo@v1
