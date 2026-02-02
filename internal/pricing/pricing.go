@@ -94,6 +94,16 @@ func NewPricingCalculator() *PricingCalculator {
 			CacheRead:    1.50,  // 15.00 * 0.1
 		},
 
+		// Claude Opus 4.5
+		"claude-opus-4-5-20251101": {
+			ModelName:    "claude-opus-4-5-20251101",
+			InputTokens:  15.00,
+			OutputTokens: 75.00,
+			CacheWrite5m: 18.75, // 15.00 * 1.25
+			CacheWrite1h: 30.00, // 15.00 * 2.0
+			CacheRead:    1.50,  // 15.00 * 0.1
+		},
+
 		// Claude 3.5 Haiku
 		"claude-3-5-haiku-20241022": {
 			ModelName:    "claude-3-5-haiku-20241022",
