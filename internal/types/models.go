@@ -46,6 +46,10 @@ type ContentBlock struct {
 	ToolUseID string      `json:"tool_use_id,omitempty"`
 	Content   interface{} `json:"content,omitempty"`
 	IsError   *bool       `json:"is_error,omitempty"`
+
+	// For thinking blocks (assistant messages)
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
 }
 
 // ImageSource represents an image source
