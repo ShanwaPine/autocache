@@ -17,9 +17,9 @@ import (
 
 // ProxyClient handles communication with the Anthropic API
 type ProxyClient struct {
-	httpClient   *http.Client
+	httpClient  *http.Client
 	anthropicURL string
-	logger       *logrus.Logger
+	logger      *logrus.Logger
 }
 
 // NewProxyClient creates a new proxy client
