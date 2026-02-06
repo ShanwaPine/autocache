@@ -34,6 +34,7 @@ func (cc *CacheControl) UnmarshalJSON(data []byte) error {
 type ContentBlock struct {
 	Type         string        `json:"type"`
 	Text         string        `json:"text,omitempty"`
+	Data         string        `json:"data,omitempty"`
 	Source       *ImageSource  `json:"source,omitempty"`
 	CacheControl *CacheControl `json:"cache_control,omitempty"`
 
