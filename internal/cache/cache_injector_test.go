@@ -442,7 +442,7 @@ func TestApplyCacheControl(t *testing.T) {
 	contentBlock := types.ContentBlock{Type: "text", Text: "User message"}
 	toolDef := types.ToolDefinition{Name: "test_tool", Description: "Test tool"}
 
-	candidates := []CacheCandidate{
+	candidates := []types.CacheCandidate{
 		{
 			Position:    "system",
 			Tokens:      1000,
@@ -619,19 +619,20 @@ func TestStrategyBehavior(t *testing.T) {
 	logger.SetLevel(logrus.ErrorLevel)
 
 	// Create a request with multiple cacheable elements
+	// 使用更大的内容以适应新的收集顺序（tools → system → content）
 	request := &types.AnthropicRequest{
 		Model:     "claude-3-5-sonnet-20241022",
 		MaxTokens: 100,
-		System:    strings.Repeat("System instructions. ", 100),
+		System:    strings.Repeat("System instructions. ", 150), // 增加大小确保达到阈值
 		Tools: []types.ToolDefinition{
-			{Name: "tool1", Description: strings.Repeat("Tool description. ", 50)},
+			{Name: "tool1", Description: strings.Repeat("Tool description. ", 100)}, // 增加大小
 		},
 		Messages: []types.Message{
 			{
 				Role: "user",
 				Content: []types.ContentBlock{
-					{Type: "text", Text: strings.Repeat("Large content block 1. ", 100)},
-					{Type: "text", Text: strings.Repeat("Large content block 2. ", 100)},
+					{Type: "text", Text: strings.Repeat("Large content block 1. ", 120)}, // 增加大小
+					{Type: "text", Text: strings.Repeat("Large content block 2. ", 120)}, // 增加大小
 				},
 			},
 		},

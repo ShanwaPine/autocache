@@ -94,13 +94,14 @@ func (c *Config) Validate() error {
 
 	// Validate cache strategy
 	validStrategies := map[string]bool{
-		"conservative": true,
-		"moderate":     true,
-		"aggressive":   true,
+		"conservative":    true,
+		"moderate":        true,
+		"aggressive":      true,
+		"auto_aggressive": true,
 	}
 
 	if !validStrategies[c.CacheStrategy] {
-		return fmt.Errorf("invalid cache strategy: %s (must be one of: conservative, moderate, aggressive)", c.CacheStrategy)
+		return fmt.Errorf("invalid cache strategy: %s (must be one of: conservative, moderate, aggressive, auto_aggressive)", c.CacheStrategy)
 	}
 
 	// Validate log level

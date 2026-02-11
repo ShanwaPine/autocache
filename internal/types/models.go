@@ -268,23 +268,173 @@ type CacheMetadata struct {
 type CacheStrategy string
 
 const (
-	StrategyConservative CacheStrategy = "conservative"
-	StrategyModerate     CacheStrategy = "moderate"
-	StrategyAggressive   CacheStrategy = "aggressive"
+	StrategyConservative   CacheStrategy = "conservative"
+	StrategyModerate       CacheStrategy = "moderate"
+	StrategyAggressive     CacheStrategy = "aggressive"
+	StrategyAutoAggressive CacheStrategy = "auto_aggressive"
 )
+
+// CacheCandidate represents a potential cache breakpoint
+// Moved from cache/injector.go for shared use across packages
+type CacheCandidate struct {
+	Position    string      // "tools", "system", "message_X_block_1", etc.
+	Tokens      int         // Token count
+	ContentType string      // "tools", "system", "content"
+	TTL         string      // "5m" or "1h"
+	ROIScore    float64     // ROI score for prioritization
+	WriteCost   float64     // Cost to write cache
+	ReadSavings float64     // Savings per read
+	BreakEven   int         // Requests to break even
+	Content     interface{} // Reference to the actual content
+}
+
+// BreakpointSelector contains strategy-specific breakpoint selection logic
+type BreakpointSelector struct {
+	// ShouldAcceptExisting returns true if we should reuse existing breakpoints
+	// Returns false to recalculate breakpoints from scratch
+	// Now receives strategy and request context for intelligent decisions
+	ShouldAcceptExisting func(existing []CacheCandidate, strategy CacheStrategy, req *AnthropicRequest) bool
+
+	// SelectBreakpoints filters and selects breakpoints according to strategy rules
+	// Input candidates are sorted: [tools, system, content1, content2, ...]
+	// Now receives strategy and request context for intelligent decisions
+	// MaxBreakpoints can be obtained from GetStrategyConfig(strategy).MaxBreakpoints
+	SelectBreakpoints func(candidates []CacheCandidate, strategy CacheStrategy, req *AnthropicRequest) []CacheCandidate
+}
 
 // StrategyConfig represents configuration for each strategy
 type StrategyConfig struct {
-	MaxBreakpoints      int      `json:"max_breakpoints"`
-	MinTokensMultiplier float64  `json:"min_tokens_multiplier"` // Multiplier for base minimum tokens
-	SystemTTL           string   `json:"system_ttl"`
-	ToolsTTL            string   `json:"tools_ttl"`
-	ContentTTL          string   `json:"content_ttl"`
-	Priority            []string `json:"priority"` // Order of content types to prioritize
+	MaxBreakpoints      int                `json:"max_breakpoints"`
+	MinTokensMultiplier float64            `json:"min_tokens_multiplier"` // Multiplier for base minimum tokens
+	SystemTTL           string             `json:"system_ttl"`
+	ToolsTTL            string             `json:"tools_ttl"`
+	ContentTTL          string             `json:"content_ttl"`
+	Priority            []string           `json:"priority"` // Order of content types to prioritize
+	Selector            BreakpointSelector // Strategy-specific selection logic
 }
 
 // GetStrategyConfig returns configuration for a given strategy
 func GetStrategyConfig(strategy CacheStrategy) StrategyConfig {
+	// Standard selector: always recalculate, sort by ROI
+	standardShouldAcceptExisting := func(existing []CacheCandidate, strategy CacheStrategy, req *AnthropicRequest) bool {
+		return false // Always recalculate for conservative/moderate/aggressive
+	}
+
+	standardSelectBreakpoints := func(candidates []CacheCandidate, strategy CacheStrategy, req *AnthropicRequest) []CacheCandidate {
+		// Get maxBreakpoints from strategy config
+		maxBreakpoints := GetStrategyConfig(strategy).MaxBreakpoints
+
+		// Sort by ROI score (descending)
+		for i := 0; i < len(candidates); i++ {
+			for j := i + 1; j < len(candidates); j++ {
+				if candidates[j].ROIScore > candidates[i].ROIScore {
+					candidates[i], candidates[j] = candidates[j], candidates[i]
+				}
+			}
+		}
+		// Limit to maxBreakpoints
+		if len(candidates) > maxBreakpoints {
+			return candidates[:maxBreakpoints]
+		}
+		return candidates
+	}
+
+	// auto_aggressive selector: conditionally accept existing breakpoints
+	autoAggressiveShouldAcceptExisting := func(existing []CacheCandidate, strategy CacheStrategy, req *AnthropicRequest) bool {
+		if len(existing) > 4 {
+			return false
+		}
+
+		// 统计 tools 和 system 断点数量
+		toolsAndSystem := 0
+		messagesCount := 0
+		for _, c := range existing {
+			if c.ContentType == "tools" || c.ContentType == "system" {
+				toolsAndSystem++
+			} else if c.ContentType == "content" {
+				messagesCount++
+			}
+		}
+
+		// 新逻辑：tools和系统断点数<=2 并且 (messages断点数==消息数 或 messages断点数>=2)
+		return toolsAndSystem <= 2 && (messagesCount >= 2 || messagesCount == len(req.Messages))
+	}
+
+	autoAggressiveSelectBreakpoints := func(candidates []CacheCandidate, strategy CacheStrategy, req *AnthropicRequest) []CacheCandidate {
+		// Get maxBreakpoints from strategy config
+		maxBreakpoints := GetStrategyConfig(strategy).MaxBreakpoints
+
+		// Input candidates are sorted: [tools, system, content1, content2, ...]
+		var result []CacheCandidate
+		var toolsBP *CacheCandidate
+		var systemBPs []CacheCandidate
+		var contentBPs []CacheCandidate
+
+		// Categorize candidates
+		for i := range candidates {
+			switch candidates[i].ContentType {
+			case "tools":
+				candidates[i].TTL = "1h" // Upgrade tools to 1h TTL
+				toolsBP = &candidates[i]
+			case "system":
+				candidates[i].TTL = "1h" // Upgrade tools to 1h TTL
+				systemBPs = append(systemBPs, candidates[i])
+			case "content":
+				contentBPs = append(contentBPs, candidates[i])
+			}
+		}
+
+		// Step 1: Handle tools + system (target <= 2)
+		toolsAndSystemCount := 0
+		if toolsBP != nil {
+			toolsAndSystemCount++
+		}
+		toolsAndSystemCount += len(systemBPs)
+
+		if toolsAndSystemCount <= 2 {
+			// Keep all tools and system
+			if toolsBP != nil {
+				result = append(result, *toolsBP)
+			}
+			result = append(result, systemBPs...)
+		} else {
+			// Prioritize tools, otherwise keep first system
+			if toolsBP != nil {
+				result = append(result, *toolsBP)
+				// Add last system to reach 2 total
+				if len(systemBPs) > 0 {
+					result = append(result, systemBPs[len(systemBPs)-1])
+				}
+			} else {
+				// No tools, keep first and last system (up to 2)
+				if len(systemBPs) > 0 {
+					result = append(result, systemBPs[0])
+				}
+				if len(systemBPs) > 1 {
+					result = append(result, systemBPs[len(systemBPs)-1])
+				}
+			}
+		}
+
+		// Step 2: Handle content breakpoints (take last 2, upgrade second-to-last to 1h)
+		if len(contentBPs) >= 2 {
+			// Take last 2
+			lastTwo := contentBPs[len(contentBPs)-2:]
+			// Upgrade second-to-last to 1h
+			lastTwo[0].TTL = "1h"
+			result = append(result, lastTwo...)
+		} else if len(contentBPs) == 1 {
+			result = append(result, contentBPs[0])
+		}
+
+		// Ensure total doesn't exceed maxBreakpoints
+		if len(result) > maxBreakpoints {
+			result = result[:maxBreakpoints]
+		}
+
+		return result
+	}
+
 	configs := map[CacheStrategy]StrategyConfig{
 		StrategyConservative: {
 			MaxBreakpoints:      2,
@@ -293,6 +443,10 @@ func GetStrategyConfig(strategy CacheStrategy) StrategyConfig {
 			ToolsTTL:            "1h",
 			ContentTTL:          "5m",
 			Priority:            []string{"system", "tools"},
+			Selector: BreakpointSelector{
+				ShouldAcceptExisting: standardShouldAcceptExisting,
+				SelectBreakpoints:    standardSelectBreakpoints,
+			},
 		},
 		StrategyModerate: {
 			MaxBreakpoints:      3,
@@ -301,6 +455,10 @@ func GetStrategyConfig(strategy CacheStrategy) StrategyConfig {
 			ToolsTTL:            "1h",
 			ContentTTL:          "5m",
 			Priority:            []string{"system", "tools", "content"},
+			Selector: BreakpointSelector{
+				ShouldAcceptExisting: standardShouldAcceptExisting,
+				SelectBreakpoints:    standardSelectBreakpoints,
+			},
 		},
 		StrategyAggressive: {
 			MaxBreakpoints:      4,
@@ -309,6 +467,22 @@ func GetStrategyConfig(strategy CacheStrategy) StrategyConfig {
 			ToolsTTL:            "1h",
 			ContentTTL:          "5m",
 			Priority:            []string{"system", "tools", "content", "large_content"},
+			Selector: BreakpointSelector{
+				ShouldAcceptExisting: standardShouldAcceptExisting,
+				SelectBreakpoints:    autoAggressiveSelectBreakpoints,
+			},
+		},
+		StrategyAutoAggressive: {
+			MaxBreakpoints:      4,
+			MinTokensMultiplier: 0.8, // More lenient token requirements
+			SystemTTL:           "1h",
+			ToolsTTL:            "1h",
+			ContentTTL:          "5m",
+			Priority:            []string{"system", "tools", "content", "large_content"},
+			Selector: BreakpointSelector{
+				ShouldAcceptExisting: autoAggressiveShouldAcceptExisting,
+				SelectBreakpoints:    autoAggressiveSelectBreakpoints,
+			},
 		},
 	}
 	return configs[strategy]

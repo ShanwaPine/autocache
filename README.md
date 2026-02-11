@@ -222,8 +222,8 @@ client = anthropic.Anthropic(
 | ------------------------- | ------------ | -------------------------------------------------------------- |
 | `PORT`                  | `8080`     | Server port                                                    |
 | `ANTHROPIC_API_KEY`     | -            | Your Anthropic API key (optional if passed in request headers) |
-| `CACHE_STRATEGY`        | `moderate` | Caching strategy:`conservative`/`moderate`/`aggressive`  |
-| `LOG_LEVEL`             | `info`     | Log level:`debug`/`info`/`warn`/`error`                |
+| `CACHE_STRATEGY`        | `moderate` | Caching strategy: `conservative`/`moderate`/`aggressive`/`auto_aggressive`  |
+| `LOG_LEVEL`             | `info`     | Log level: `debug`/`info`/`warn`/`error`                |
 | `MAX_CACHE_BREAKPOINTS` | `4`        | Maximum cache breakpoints (1-4)                                |
 | `TOKEN_MULTIPLIER`      | `1.0`      | Token threshold multiplier                                     |
 
@@ -269,7 +269,15 @@ The Anthropic API key can be provided in three ways (in order of precedence):
 
 - **Focus**: Maximum caching coverage
 - **Breakpoints**: All 4 available
+- **Logic**: Automatically upgrades content TTL to 1h when multiple breakpoints exist, ensuring protocol compliance
 - **Best For**: High-volume applications with repeated content
+
+#### 🤖 Auto-Aggressive
+
+- **Focus**: Intelligent multi-breakpoint management
+- **Breakpoints**: All 4 available
+- **Logic**: Automatically detects existing cache breakpoints and intelligently adds or merges new ones
+- **Best For**: Complex AI agents with iterative context (like Claude Code)
 
 ## ROI Analytics
 

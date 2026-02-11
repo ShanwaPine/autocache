@@ -93,7 +93,7 @@ func TestTTLUpgradeLogic(t *testing.T) {
 
 	// Test case 1: No 1h TTL, no upgrades should happen
 	t.Run("No upgrades needed", func(t *testing.T) {
-		candidates := []CacheCandidate{
+		candidates := []types.CacheCandidate{
 			{Position: "message_0", TTL: "5m", Tokens: 1000, ContentType: "content"},
 			{Position: "message_1", TTL: "5m", Tokens: 1500, ContentType: "content"},
 		}
@@ -109,9 +109,9 @@ func TestTTLUpgradeLogic(t *testing.T) {
 
 	// Test case 2: 1h TTL present, all preceding should upgrade
 	t.Run("Upgrade preceding candidates", func(t *testing.T) {
-		candidates := []CacheCandidate{
+		candidates := []types.CacheCandidate{
 			{Position: "system", TTL: "5m", Tokens: 1000, ContentType: "content"},        // Should upgrade
-			{Position: "message_0", TTL: "5m", Tokens: 1500, ContentType: "content"},    // Should upgrade  
+			{Position: "message_0", TTL: "5m", Tokens: 1500, ContentType: "content"},    // Should upgrade
 			{Position: "message_1", TTL: "1h", Tokens: 1200, ContentType: "content"},    // Original 1h
 			{Position: "message_2", TTL: "5m", Tokens: 800, ContentType: "content"},     // Should stay 5m
 		}
@@ -129,7 +129,7 @@ func TestTTLUpgradeLogic(t *testing.T) {
 
 	// Test case 3: Multiple 1h TTLs, upgrade up to the last one
 	t.Run("Multiple 1h TTLs", func(t *testing.T) {
-		candidates := []CacheCandidate{
+		candidates := []types.CacheCandidate{
 			{Position: "system", TTL: "5m", Tokens: 1000, ContentType: "content"},       // Should upgrade
 			{Position: "message_0", TTL: "1h", Tokens: 1500, ContentType: "content"},   // Original 1h
 			{Position: "message_1", TTL: "5m", Tokens: 1200, ContentType: "content"},   // Should upgrade (between 1h)

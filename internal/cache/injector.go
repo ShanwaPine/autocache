@@ -95,20 +95,8 @@ func (ci *CacheInjector) GetPricing() *pricing.PricingCalculator {
 	return ci.pricing
 }
 
-// CacheCandidate represents a potential cache breakpoint
-type CacheCandidate struct {
-	Position    string      // "system", "tools", "message_0_block_1", etc.
-	Tokens      int         // Token count
-	ContentType string      // "system", "tools", "content"
-	TTL         string      // "5m" or "1h"
-	ROIScore    float64     // ROI score for prioritization
-	WriteCost   float64     // Cost to write cache
-	ReadSavings float64     // Savings per read
-	BreakEven   int         // Requests to break even
-	Content     interface{} // Reference to the actual content (for modification)
-}
-
 // InjectCacheControl analyzes a request and injects optimal cache control
+// Refactored to use strategy-driven breakpoint selection
 func (ci *CacheInjector) InjectCacheControl(req *types.AnthropicRequest) (*types.CacheMetadata, error) {
 	startTime := time.Now()
 
@@ -117,31 +105,38 @@ func (ci *CacheInjector) InjectCacheControl(req *types.AnthropicRequest) (*types
 		"strategy": ci.strategy,
 	}).Debug("Starting cache injection analysis")
 
-	// Clear any existing cache_control to avoid exceeding the 4-block limit
-	ci.ClearExistingCacheControl(req)
-
-	// Get strategy configuration
+	// 1. Get strategy configuration (includes Selector)
 	strategyConfig := types.GetStrategyConfig(ci.strategy)
-	minimumTokens := ci.tokenizer.GetModelMinimumTokens(req.Model)
-	adjustedMinimum := int(float64(minimumTokens) * strategyConfig.MinTokensMultiplier)
 
-	// Collect all cache candidates in deterministic order (system → tools → messages)
-	candidates := ci.CollectCacheCandidates(req, adjustedMinimum, strategyConfig)
+	// 2. Collect existing breakpoints in order: [tools, system, content1, content2, ...]
+	existingBreakpoints := ci.collectExistingBreakpoints(req)
 
-	// Apply TTL upgrade logic: if any candidate has 1h TTL, upgrade all preceding ones to 1h
-	// This ensures cache protocol compliance and hierarchy consistency
-	ci.upgradeTTLHierarchy(candidates, req.Model)
+	var candidates []types.CacheCandidate
 
-	// Select top candidates respecting breakpoint limit
-	maxBreakpoints := strategyConfig.MaxBreakpoints
-	if len(candidates) > maxBreakpoints {
-		candidates = candidates[:maxBreakpoints]
+	// 3. Strategy decides whether to accept existing breakpoints
+	if strategyConfig.Selector.ShouldAcceptExisting(existingBreakpoints, ci.strategy, req) {
+		// Accept: use existing breakpoints
+		ci.logger.WithField("count", len(existingBreakpoints)).Debug("Strategy accepts existing breakpoints")
+		candidates = existingBreakpoints
+	} else {
+		// Reject: recalculate breakpoints
+		ci.logger.Debug("Strategy rejects existing breakpoints, recalculating")
+		minimumTokens := ci.tokenizer.GetModelMinimumTokens(req.Model)
+		adjustedMinimum := int(float64(minimumTokens) * strategyConfig.MinTokensMultiplier)
+		candidates = ci.CollectCacheCandidates(req, adjustedMinimum, strategyConfig)
 	}
 
-	// Apply cache control to selected candidates
+	// 4. Strategy selects breakpoints according to its rules
+	candidates = strategyConfig.Selector.SelectBreakpoints(candidates, ci.strategy, req)
+
+	// 5. Apply TTL hierarchy upgrade (Claude Code protocol compliance)
+	ci.upgradeTTLHierarchy(candidates, req.Model)
+
+	// 6. Apply cache control to selected candidates
+	ci.ClearExistingCacheControl(req)
 	breakpoints := ci.ApplyCacheControl(candidates)
 
-	// Calculate metadata
+	// 7. Calculate metadata
 	metadata := ci.calculateMetadata(req, breakpoints, startTime)
 
 	ci.logger.WithFields(logrus.Fields{
@@ -154,6 +149,67 @@ func (ci *CacheInjector) InjectCacheControl(req *types.AnthropicRequest) (*types
 	}).Info("Cache injection completed")
 
 	return metadata, nil
+}
+
+// collectExistingBreakpoints 收集用户已有的缓存断点位置
+func (ci *CacheInjector) collectExistingBreakpoints(req *types.AnthropicRequest) []types.CacheCandidate {
+	var candidates []types.CacheCandidate
+
+	// Check tools
+	for i := len(req.Tools) - 1; i >= 0; i-- {
+		if req.Tools[i].CacheControl != nil {
+			candidate := types.CacheCandidate{
+				Position:    "tools",
+				ContentType: "tools",
+				TTL:         req.Tools[i].CacheControl.TTL,
+				Content:     &req.Tools,
+			}
+			// 计算 tools 的总 token 数
+			totalToolTokens := 0
+			for _, tool := range req.Tools {
+				totalToolTokens += ci.tokenizer.CountToolTokens(tool)
+			}
+			candidate.Tokens = totalToolTokens
+			candidates = append(candidates, candidate)
+			break // 只取最后一个（tools 只有一个断点）
+		}
+	}
+
+	// Check system blocks
+	for i := len(req.SystemBlocks) - 1; i >= 0; i-- {
+		if req.SystemBlocks[i].CacheControl != nil {
+			tokens := ci.tokenizer.CountSystemBlocksTokens(req.SystemBlocks)
+			candidate := types.CacheCandidate{
+				Position:    "system",
+				ContentType: "system",
+				Tokens:      tokens,
+				TTL:         req.SystemBlocks[i].CacheControl.TTL,
+				Content:     &req.SystemBlocks,
+			}
+			candidates = append(candidates, candidate)
+			break // 只取最后一个
+		}
+	}
+
+	// Check message content blocks
+	for msgIdx := range req.Messages {
+		for blockIdx := len(req.Messages[msgIdx].Content) - 1; blockIdx >= 0; blockIdx-- {
+			if req.Messages[msgIdx].Content[blockIdx].CacheControl != nil {
+				tokens := ci.tokenizer.CountTokens(req.Messages[msgIdx].Content[blockIdx].Text)
+				candidate := types.CacheCandidate{
+					Position:    fmt.Sprintf("message_%d_block_%d", msgIdx, blockIdx),
+					ContentType: "content",
+					Tokens:      tokens,
+					TTL:         req.Messages[msgIdx].Content[blockIdx].CacheControl.TTL,
+					Content:     &req.Messages[msgIdx].Content[blockIdx],
+				}
+				candidates = append(candidates, candidate)
+				break // 只取每个 message 的最后一个
+			}
+		}
+	}
+
+	return candidates
 }
 
 // ClearExistingCacheControl removes all existing cache_control from a request
@@ -180,11 +236,25 @@ func (ci *CacheInjector) ClearExistingCacheControl(req *types.AnthropicRequest) 
 }
 
 // CollectCacheCandidates finds all potential cache breakpoints
-func (ci *CacheInjector) CollectCacheCandidates(req *types.AnthropicRequest, minTokens int, strategyConfig types.StrategyConfig) []CacheCandidate {
-	var candidates []CacheCandidate
+// 收集顺序：tools → system → content (Claude Code 协议)
+func (ci *CacheInjector) CollectCacheCandidates(req *types.AnthropicRequest, minTokens int, strategyConfig types.StrategyConfig) []types.CacheCandidate {
+	var candidates []types.CacheCandidate
 
-	// Handle system content (both string and blocks format)
-	// If system is a string, convert it to blocks format to support cache control
+	// 注意：收集顺序改为 tools → system → content (Claude Code 协议)
+
+	// Check tools (优先于 system)
+	if len(req.Tools) > 0 {
+		totalToolTokens := 0
+		for _, tool := range req.Tools {
+			totalToolTokens += ci.tokenizer.CountToolTokens(tool)
+		}
+		if totalToolTokens >= minTokens {
+			candidate := ci.CreateCandidate("tools", totalToolTokens, "tools", strategyConfig.ToolsTTL, req.Model, &req.Tools)
+			candidates = append(candidates, candidate)
+		}
+	}
+
+	// Handle system content
 	if req.System != "" && len(req.SystemBlocks) == 0 {
 		tokens := ci.tokenizer.CountSystemTokens(req.System)
 		if tokens >= minTokens {
@@ -211,19 +281,7 @@ func (ci *CacheInjector) CollectCacheCandidates(req *types.AnthropicRequest, min
 		}
 	}
 
-	// Check tools
-	if len(req.Tools) > 0 {
-		totalToolTokens := 0
-		for _, tool := range req.Tools {
-			totalToolTokens += ci.tokenizer.CountToolTokens(tool)
-		}
-		if totalToolTokens >= minTokens {
-			candidate := ci.CreateCandidate("tools", totalToolTokens, "tools", strategyConfig.ToolsTTL, req.Model, &req.Tools)
-			candidates = append(candidates, candidate)
-		}
-	}
-
-	// Check message content blocks
+	// Check message content blocks (最后收集)
 	for msgIdx, message := range req.Messages {
 		for blockIdx, block := range message.Content {
 			if block.Type == "text" && block.Text != "" {
@@ -245,13 +303,13 @@ func (ci *CacheInjector) CollectCacheCandidates(req *types.AnthropicRequest, min
 }
 
 // CreateCandidate creates a cache candidate with ROI calculation
-func (ci *CacheInjector) CreateCandidate(position string, tokens int, contentType, ttl, model string, content interface{}) CacheCandidate {
+func (ci *CacheInjector) CreateCandidate(position string, tokens int, contentType, ttl, model string, content interface{}) types.CacheCandidate {
 	writeCost, readSavings, breakEven, _ := ci.pricing.EstimateBreakpointROI(model, tokens, ttl)
 
 	// Calculate ROI score for prioritization
 	roiScore := ci.CalculateROIScore(tokens, writeCost, readSavings, breakEven, contentType)
 
-	return CacheCandidate{
+	return types.CacheCandidate{
 		Position:    position,
 		Tokens:      tokens,
 		ContentType: contentType,
@@ -306,13 +364,13 @@ func (ci *CacheInjector) CalculateROIScore(tokens int, writeCost, readSavings fl
 // upgradeTTLHierarchy ensures cache hierarchy consistency by upgrading TTLs when needed
 // If any candidate has 1h TTL, all preceding candidates are upgraded to 1h TTL
 // This satisfies Anthropic's cache protocol requirement for proper hierarchy
-func (ci *CacheInjector) upgradeTTLHierarchy(candidates []CacheCandidate, model string) {
+func (ci *CacheInjector) upgradeTTLHierarchy(candidates []types.CacheCandidate, model string) {
 	// First pass: find the last 1h TTL position
 	lastOneHourIndex := -1
 	for i, candidate := range candidates {
 		if candidate.TTL == "1h" {
 			lastOneHourIndex = i
-		}
+					}
 	}
 
 	if lastOneHourIndex == -1 {
@@ -326,28 +384,28 @@ func (ci *CacheInjector) upgradeTTLHierarchy(candidates []CacheCandidate, model 
 		if candidates[i].TTL != "1h" {
 			originalTTL := candidates[i].TTL
 			candidates[i].TTL = "1h"
-			
+
 			// Recalculate costs with new TTL using a default model
 			// The exact model doesn't affect the upgrade logic significantly
 			writeCost, readSavings, breakEven, _ := ci.pricing.EstimateBreakpointROI(
 				model, // Use consistent model for calculation
-				candidates[i].Tokens, 
-				"1h")
-			
+candidates[i].Tokens, 
+"1h")
+
 			candidates[i].WriteCost = writeCost
 			candidates[i].ReadSavings = readSavings
 			candidates[i].BreakEven = breakEven
-			
+
 			// Recalculate ROI score with new values
 			candidates[i].ROIScore = ci.CalculateROIScore(
 				candidates[i].Tokens, 
-				writeCost, 
-				readSavings, 
-				breakEven, 
-				candidates[i].ContentType)
+writeCost, 
+readSavings, 
+breakEven, 
+candidates[i].ContentType)
 
 			upgradedCount++
-			
+
 			ci.logger.WithFields(logrus.Fields{
 				"position":     candidates[i].Position,
 				"original_ttl": originalTTL,
@@ -383,7 +441,7 @@ func (ci *CacheInjector) DetermineTTLForContent(text string, strategyConfig type
 }
 
 // ApplyCacheControl applies cache control to the selected candidates
-func (ci *CacheInjector) ApplyCacheControl(candidates []CacheCandidate) []types.CacheBreakpoint {
+func (ci *CacheInjector) ApplyCacheControl(candidates []types.CacheCandidate) []types.CacheBreakpoint {
 	var breakpoints []types.CacheBreakpoint
 
 	for _, candidate := range candidates {
